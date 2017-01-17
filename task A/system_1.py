@@ -86,7 +86,7 @@ def main():
     X_new = np.concatenate((X_train, X_dev, X_test))
     y_new = np.concatenate((y_train, y_dev, y_test))
 
-    eclf = VotingClassifier(estimators=pipelines, voting='hard', n_jobs=1)
+    eclf = VotingClassifier(estimators=pipelines, voting='hard', n_jobs=4)
 
     eclf.fit(X_new, y_new)
 
