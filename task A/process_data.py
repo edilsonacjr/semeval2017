@@ -84,7 +84,7 @@ def main():
                 tokens = preprocess(text)
 
                 # remove stopwords and others
-                tokens = [term for term in tokens if term not in stop]
+                tokens = [term.lower() for term in tokens if term.lower() not in stop]
 
                 # remove hashtags
                 #tokens = [term for term in tokens if not term.startswith('#')]
