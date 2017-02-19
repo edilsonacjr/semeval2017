@@ -87,10 +87,10 @@ def main():
                 tokens = [term.lower() for term in tokens if term.lower() not in stop]
 
                 # remove hashtags
-                #tokens = [term for term in tokens if not term.startswith('#')]
+                tokens = [term for term in tokens if not term.startswith('#')]
 
                 # remove profiles
-                #tokens = [term for term in tokens if not term.startswith('@')]
+                tokens = [term for term in tokens if not term.startswith('@')]
 
 
 

@@ -2,21 +2,26 @@
 import pandas as pd
 import numpy as np
 
-from sklearn.svm import SVC
+from igraph import *
+from sklearn.svm import SVC, LinearSVC
 from sklearn.naive_bayes import MultinomialNB
 from sklearn.linear_model import LogisticRegression
 from sklearn.neighbors import KNeighborsClassifier
 from sklearn.tree import DecisionTreeClassifier
-from sklearn.ensemble import RandomForestClassifier, AdaBoostClassifier
+from sklearn.ensemble import RandomForestClassifier, AdaBoostClassifier, ExtraTreesClassifier
 from sklearn.ensemble import VotingClassifier
 
 from sklearn.feature_extraction.text import TfidfVectorizer, CountVectorizer
 from sklearn.pipeline import make_pipeline
 from sklearn.metrics import accuracy_score, f1_score
 from sklearn.preprocessing import LabelEncoder
+from sklearn.metrics.pairwise import cosine_similarity, euclidean_distances
+
 from sklearn.base import TransformerMixin
+from sklearn.base import BaseEstimator, ClassifierMixin
 
 from gensim.models import Word2Vec
+from collections import Counter
 
 PROC_DIR = '../data/processed/'
 
@@ -47,9 +52,92 @@ class W2VTransformer(TransformerMixin):
         return self
 
 
+class TfidfEmbeddingVectorizer(TransformerMixin):
+    def __init__(self, model):
+        self.model = model
+
+    def fit(self, X, y=None, **fit_params):
+        tfidf = TfidfVectorizer()
+        tfidf.fit(X)
+        self.max_idf = max(tfidf.idf_)
+        self.word2weight = defaultdict(int, [(w, tfidf.idf_[i]) for w, i in tfidf.vocabulary_.items()])
+
+        return self
+
+    def transform(self, X, y=None, **fit_params):
+        out_m = []
+
+        for text in X:
+            parag_M = []
+            for token in text.split():
+                if token in self.model:
+                    if token in self.word2weight:
+                        parag_M.append(self.model[token] * self.word2weight[token])
+                    else:
+                        parag_M.append(self.model[token] * self.max_idf)
+            if parag_M:
+                out_m.append(np.average(parag_M, axis=0))
+            else:
+                out_m.append(np.random.rand(1, 300)[0])
+        return np.array(out_m)
+
+    def fit_transform(self, X, y=None, **fit_params):
+        self.fit(X, y, **fit_params)
+        return self.transform(X)
+
+
+class ComplexNetworkClassifier(BaseEstimator, ClassifierMixin):
+    def __init__(self, k=4):
+        self.k = k
+
+    def fit(self, X, y):
+
+        eucl = euclidean_distances(X)
+
+        k = self.k
+        while True:
+            simi_m = 1 / (1 + eucl)
+            to_remove = simi_m.shape[0] - (k + 1)
+
+            for vec in simi_m:
+                vec[vec.argsort()[:to_remove]] = 0
+
+            g = Graph.Weighted_Adjacency(simi_m.tolist(), mode=ADJ_UNDIRECTED, loops=False)
+
+            if g.is_connected():
+                break
+            k += 1
+
+        self.k = k
+        comm = g.community_multilevel()
+        self.y_comm = np.array(comm.membership)
+        self.y = y
+        self.X = X
+        self.mapping = {}
+        for c in list(set(comm.membership)):
+            com_clas = self.y[self.y_comm==c]
+            self.mapping[c] = Counter(com_clas).most_common(1)[0][0]
+
+
+    def predict(self, X):
+        y_pred = []
+        for x in X:
+            dists = euclidean_distances([x], self.X)[0]
+            simi_m = 1 / (1 + dists)
+            nearest_com = self.y_comm[simi_m.argsort()[-self.k:]]
+            y_pred.append(self.mapping[Counter(nearest_com).most_common(1)[0][0]])
+
+        return np.array(y_pred)
+
+    def score(self, X, y):
+        y_pred = self.predict(X)
+
+        return accuracy_score(y, y_pred)
+
+
 def main():
 
-
+    # Load word2vec
     model = Word2Vec.load_word2vec_format('~/GoogleNews-vectors-negative300.bin', binary=True)
 
     # Lexicon load
@@ -61,7 +149,21 @@ def main():
     pos_lexicon = lex_file.read().splitlines()
     lex_file.close()
 
+    # Emoticons
+    pos_emo = [':-)', ':)', '(-:', '(:', ':-]', '[-:', ':]', '[:', ':-d', ':>)', ':>d', '(<:', ':d', 'b-)', ';-)',
+                '(-;', ';)', '(;', ';-d', ';>)', ';>d', '(>;', ';]', '=)', '(=', '=d', '=]', '[=', '(^_^)', '(^_~)',
+                '^_^', '^_~', ':->', ':>', '8-)', '8)', ':-}', ':}', ':o)', ':c)', ':^)', '<-:', '<:', '(-8', '(8',
+                '{-:', '{:', '(o:', '(^:', '=->', '=>', '=-}', '=}', '=o)', '=c)', '=^)', '<-=', '<=', '{-=', '{=',
+                '(o=', '(^=', '8-]', '8]', ':o]', ':c]', ':^]', '[-8', '[8', '[o:', '[^:', '=o]', '=c]', '=^]', '[o=',
+                '[^=', '8‑d', '8d', 'x‑d', 'xd', ':-))', '((-:', ';-))', '((-;', '=))', '((=', ':p', ';p', '=p']
+    neg_emo = ['#-|', ':-&', ':&', ':-(', ')-:', '(t_t)', 't_t', '8-(', ')-8', '8(', ')8', '8o|', '|o8', ':$', ':\'(',
+                ':\'-(', ':(', ':-/', ')\':', ')-\':', '):', '\-:', ':\'[', ':\'-[', ':-[', ']\':', ']-\':', ']-:',
+                '=-(', '=-/', ')\'=', ')-\'=', ')-=', '\-=', ':-<', ':-c', ':-s', ':-x', ':-|', ':-||', ':/', ':<',
+                ':[', ':o', ':|', '=(', '=[', '=\'(', '=\'[', ')=', ']=', '>-:', 'x-:', '|-:', '||-:', '\:', '>:', ']:',
+                'o:', '|:', '=|', '=x', 'x=', '|=', '>:(', ':((', '):<', ')):', '>=(', '=((', ')=<', '))=', ':{', ':@',
+                '}:', '@:', '={', '=@', '}=', '@=', 'd‑\':', 'd:<', 'd:', 'd8', 'd;', 'd=', 'd‑\'=', 'd=<', 'dx']
 
+    # Data
     df_train = pd.read_csv(PROC_DIR + 'train.csv')
     df_test = pd.read_csv(PROC_DIR + 'test.csv')
     df_dev = pd.read_csv(PROC_DIR + 'dev.csv')
@@ -79,161 +181,69 @@ def main():
     X_test = df_test['text'].values
     y_test = le.transform(df_test['label'].values)
 
-
-    # pipelines to be used in the ensemble
+    """ Pipelines to be used in the ensemble"""
 
     pipelines = []
 
     pipe1 = make_pipeline(TfidfVectorizer(sublinear_tf=True), SVC(kernel='linear', probability=True))
     pipelines.append(('tfidf-SVM', pipe1))
 
-    pipe3 = make_pipeline(TfidfVectorizer(sublinear_tf=True, ngram_range=(2, 3), analyzer='char'),
-                          SVC(kernel='linear', probability=True))
-    pipelines.append(('char-SVM', pipe3))
+    pipe62 = make_pipeline(W2VTransformer(model=model), SVC(kernel='linear', probability=True))
+    pipelines.append(('w2v-SVM', pipe62))
 
-    pipe5 = make_pipeline(CountVectorizer(vocabulary=set(pos_lexicon+neg_lexicon)),
-                          SVC(kernel='linear', probability=True))
-    pipelines.append(('lexicon-SVM', pipe5))
+    pipe71 = make_pipeline(TfidfEmbeddingVectorizer(model=model), LogisticRegression())
+    pipelines.append(('w2vW-LR', pipe71))
 
-    pipe6 = make_pipeline(W2VTransformer(model=model), KNeighborsClassifier(1))
-    pipelines.append(('w2v-KNN', pipe6))
-
+    """learning weights for classifiers - Stacking"""
     """
-    # tfidf
-    pipe1 = make_pipeline(TfidfVectorizer(sublinear_tf=True), SVC(kernel='linear', probability=True))
-    pipelines.append(('tfidf-SVM', pipe1))
-
-    pipe12 = make_pipeline(TfidfVectorizer(sublinear_tf=True), KNeighborsClassifier(3))
-    pipelines.append(('tfidf-KNN', pipe12))
-
-    pipe13 = make_pipeline(TfidfVectorizer(sublinear_tf=True), DecisionTreeClassifier())
-    pipelines.append(('tfidf-CART', pipe13))
-
-    pipe14 = make_pipeline(TfidfVectorizer(sublinear_tf=True), RandomForestClassifier())
-    pipelines.append(('tfidf-RF', pipe14))
-
-    #pipe15 = make_pipeline(TfidfVectorizer(sublinear_tf=True), AdaBoostClassifier())
-    #pipelines.append(('tfidf-ADA', pipe15))
-
-    #pipe16 = make_pipeline(TfidfVectorizer(sublinear_tf=True), MultinomialNB())
-    #pipelines.append(('tfidf-MNB', pipe16))
-
-
-    # ngram
-    #pipe2 = make_pipeline(TfidfVectorizer(sublinear_tf=True, ngram_range=(2, 4)),
-    #                      SVC(kernel='linear', probability=True))
-    #pipelines.append(('ngram-SVM', pipe2))
-
-    pipe22 = make_pipeline(TfidfVectorizer(sublinear_tf=True, ngram_range=(2, 4)),
-                           KNeighborsClassifier(3))
-    pipelines.append(('ngram-KNN', pipe22))
-
-    #pipe23 = make_pipeline(TfidfVectorizer(sublinear_tf=True, ngram_range=(2, 4)),
-    #                       DecisionTreeClassifier())
-    #pipelines.append(('ngram-CART', pipe23))
-
-    #pipe24 = make_pipeline(TfidfVectorizer(sublinear_tf=True, ngram_range=(2, 4)),
-    #                       RandomForestClassifier())
-    #pipelines.append(('ngram-RF', pipe24))
-
-    #pipe25 = make_pipeline(TfidfVectorizer(sublinear_tf=True, ngram_range=(2, 4)),
-    #                       AdaBoostClassifier())
-    #pipelines.append(('ngram-ADA', pipe25))
-
-    #pipe26 = make_pipeline(TfidfVectorizer(sublinear_tf=True, ngram_range=(2, 4)),
-    #                       MultinomialNB())
-    #pipelines.append(('ngram-MNB', pipe26))
-
-
-    # tfidf char-ngram
-    pipe3 = make_pipeline(TfidfVectorizer(sublinear_tf=True, ngram_range=(2, 3), analyzer='char'),
-                          SVC(kernel='linear', probability=True))
-    pipelines.append(('char-SVM', pipe3))
-
-    pipe32 = make_pipeline(TfidfVectorizer(sublinear_tf=True, ngram_range=(2, 3), analyzer='char'),
-                           KNeighborsClassifier(3))
-    pipelines.append(('char-KNN', pipe32))
-
-    pipe33 = make_pipeline(TfidfVectorizer(sublinear_tf=True, ngram_range=(2, 3), analyzer='char'),
-                           DecisionTreeClassifier())
-    pipelines.append(('char-CART', pipe33))
-
-    pipe34 = make_pipeline(TfidfVectorizer(sublinear_tf=True, ngram_range=(2, 3), analyzer='char'),
-                           RandomForestClassifier())
-    pipelines.append(('char-RF', pipe34))
-
-    pipe35 = make_pipeline(TfidfVectorizer(sublinear_tf=True, ngram_range=(2, 3), analyzer='char'),
-                           AdaBoostClassifier())
-    pipelines.append(('char-ADA', pipe35))
-
-    #pipe36 = make_pipeline(TfidfVectorizer(sublinear_tf=True, ngram_range=(2, 3), analyzer='char'),
-    #                       MultinomialNB())
-    #pipelines.append(('char-MNB', pipe36))
-
-    # count using lexicon negative
-    pipe4 = make_pipeline(CountVectorizer(vocabulary=set(neg_lexicon)),
-                          SVC(kernel='linear', probability=True))
-    pipelines.append(('lexicon-SVM', pipe4))
-
-    #pipe42 = make_pipeline(CountVectorizer(vocabulary=set(neg_lexicon)),
-    #                       KNeighborsClassifier(3))
-    #pipelines.append(('lexicon-KNN', pipe42))
-
-    pipe43 = make_pipeline(CountVectorizer(vocabulary=set(neg_lexicon)),
-                           DecisionTreeClassifier())
-    pipelines.append(('lexicon-CART', pipe43))
-
-    pipe44 = make_pipeline(CountVectorizer(vocabulary=set(neg_lexicon)),
-                           RandomForestClassifier())
-    pipelines.append(('lexicon-RF', pipe44))
-
-    pipe45 = make_pipeline(CountVectorizer(vocabulary=set(neg_lexicon)),
-                           AdaBoostClassifier())
-    pipelines.append(('lexicon-ADA', pipe45))
-
-    pipe46 = make_pipeline(CountVectorizer(vocabulary=set(neg_lexicon)),
-                           MultinomialNB())
-    pipelines.append(('lexicon-MNB', pipe46))
-
-    # count using lexicon positive
-    pipe5 = make_pipeline(CountVectorizer(vocabulary=set(pos_lexicon)),
-                          SVC(kernel='linear', probability=True))
-    pipelines.append(('lexiconp-SVM', pipe5))
-
-    #pipe52 = make_pipeline(CountVectorizer(vocabulary=set(pos_lexicon)),
-    #                       KNeighborsClassifier(3))
-    #pipelines.append(('lexiconp-KNN', pipe52))
-
-    pipe53 = make_pipeline(CountVectorizer(vocabulary=set(pos_lexicon)),
-                           DecisionTreeClassifier())
-    pipelines.append(('lexiconp-CART', pipe53))
-
-    pipe54 = make_pipeline(CountVectorizer(vocabulary=set(pos_lexicon)),
-                           RandomForestClassifier())
-    pipelines.append(('lexiconp-RF', pipe54))
-
-    pipe55 = make_pipeline(CountVectorizer(vocabulary=set(pos_lexicon)),
-                           AdaBoostClassifier())
-    pipelines.append(('lexiconp-ADA', pipe55))
-
-    pipe56 = make_pipeline(CountVectorizer(vocabulary=set(pos_lexicon)),
-                           MultinomialNB())
-    pipelines.append(('lexiconp-MNB', pipe56))
-    """
-
-    # learning weights for classifiers - Stacking
-    """
+    # Training stacker
     eclf = VotingClassifier(estimators=pipelines, voting='hard', n_jobs=1)
-    eclf.fit(X_train, y_train)
+
+    X_new = np.concatenate((X_train, X_dev))  # , X_test))
+    y_new = np.concatenate((y_train, y_dev))  # , y_test))
+
+    eclf.fit(X_new, y_new)
+
     individual_results = {}
     for estimator, (name, _) in zip(eclf.estimators_, eclf.estimators):
-        individual_results[name] = estimator.predict(X_train)
+        individual_results[name] = estimator.predict(X_new)
 
     df_estimators = pd.DataFrame(individual_results)
 
     stacker = LogisticRegression()
-    stacker.fit(df_estimators.values, y_train)
+    stacker.fit(df_estimators.values, y_new)
+    #
 
+    # load eval data
+    df_evaldev = pd.read_csv(PROC_DIR + 'eval-dev.csv')
+    df_evalfinal = pd.read_csv(PROC_DIR + 'eval-final.csv')
+
+    X_evaldev = df_evaldev['text'].values
+    X_evalfinal = df_evalfinal['text'].values
+
+    individual_results = {}
+    for estimator, (name, _) in zip(eclf.estimators_, eclf.estimators):
+        individual_results[name] = estimator.predict(X_evaldev)
+
+    df_estimators = pd.DataFrame(individual_results)
+    # predict eval dev
+    y_pred_dev = stacker.predict(df_estimators.values)
+
+    df_saida = pd.DataFrame({'id': df_evaldev['id'].values, 'class': le.inverse_transform(y_pred_dev)})
+    df_saida.to_csv('../data/results/eval-dev-stacked.txt', header=False, index=False, sep='\t', columns=['id', 'class'])
+
+    individual_results = {}
+    for estimator, (name, _) in zip(eclf.estimators_, eclf.estimators):
+        individual_results[name] = estimator.predict(X_evalfinal)
+
+    df_estimators = pd.DataFrame(individual_results)
+    # predict eval final
+    y_pred_final = stacker.predict(df_estimators.values)
+
+    df_saida = pd.DataFrame({'id': df_evalfinal['id'].values, 'class': le.inverse_transform(y_pred_final)})
+    df_saida.to_csv('../data/results/eval-final-stacked.txt', header=False, index=False, sep='\t', columns=['id', 'class'])
+
+    # predict eval test
     for estimator, (name, _) in zip(eclf.estimators_, eclf.estimators):
         individual_results[name] = estimator.predict(X_test)
 
@@ -246,10 +256,18 @@ def main():
     print('F1 score: %.5f' % f1_score(y_test, y_pred, average='macro'))
     """
 
-    # ensemble, hard for majority of votes, soft uses argmax of probabilities
-    eclf = VotingClassifier(estimators=pipelines, voting='soft', n_jobs=6)
+    """ Ensemble, hard for majority of votes, soft uses argmax of probabilities"""
+    #eclf = VotingClassifier(estimators=pipelines, voting='soft', n_jobs=6)
 
-    eclf.fit(X_train, y_train)
+    #eclf.fit(X_train, y_train)
+
+
+    X_new = np.concatenate((X_train, X_dev, X_test))  # , X_test))
+    y_new = np.concatenate((y_train, y_dev, y_test))  # , y_test))
+
+    eclf = VotingClassifier(estimators=pipelines, voting='soft', n_jobs=4)
+
+    eclf.fit(X_new, y_new)
 
     print('Ensemble ====')
     print('Accuracy (train): %.5f' % accuracy_score(y_train, eclf.predict(X_train)))
@@ -258,20 +276,17 @@ def main():
     print('F1 score: %.5f' % f1_score(y_test, eclf.predict(X_test), average='macro'))
 
     # Individual Evaluation
-    """
     print()
     print('Individual Evaluation')
 
     for estimator, (name, _) in zip(eclf.estimators_, eclf.estimators):
         print('Accuracy (%s): %.5f' % (name, accuracy_score(y_test, estimator.predict(X_test))))
-    """
 
 
     # Final evaluation
-    #"""
 
-    X_new = np.concatenate((X_train, X_dev))#, X_test))
-    y_new = np.concatenate((y_train, y_dev))#, y_test))
+    #X_new = np.concatenate((X_train, X_dev))#, X_test))
+    #y_new = np.concatenate((y_train, y_dev))#, y_test))
 
     #eclf = VotingClassifier(estimators=pipelines, voting='hard', n_jobs=4)
 
@@ -281,16 +296,13 @@ def main():
     df_evalfinal = pd.read_csv(PROC_DIR + 'eval-final.csv')
 
     X_evaldev = df_evaldev['text'].values
-
     X_evalfinal = df_evalfinal['text'].values
-
 
     df_saida = pd.DataFrame({'id': df_evaldev['id'].values, 'class': le.inverse_transform(eclf.predict(X_evaldev))})
     df_saida.to_csv('../data/results/eval-dev.txt', header=False, index=False, sep='\t', columns=['id', 'class'])
 
     df_saida = pd.DataFrame({'id': df_evalfinal['id'].values, 'class': le.inverse_transform(eclf.predict(X_evalfinal))})
     df_saida.to_csv('../data/results/eval-final.txt', header=False, index=False, sep='\t', columns=['id', 'class'])
-    #"""
 
 if __name__ == '__main__':
     main()
